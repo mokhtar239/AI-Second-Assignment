@@ -167,7 +167,12 @@ insert_sorted(N, [M|Rest], [M|Rest2]) :-
 % (1) HEURISTIC FUNCTION
 % --------------------------------------------------------------
 
-
+% heuristic(+State, -H)
+% H = K * (number of survivors still to collect) + (minimum Manhattan
+% distance from current position to the nearest uncollected survivor).
+% K = Rows + Cols + 1 makes the "missing survivors" term dominate the
+% "distance to next" term, so the search always prefers states that have
+% collected more survivors, breaking ties by closeness to the next one.
 heuristic(state(Pos, _Path, Collected), H) :-
     grid_size(Rows, Cols),
     K is Rows + Cols + 1,
@@ -175,3 +180,120 @@ heuristic(state(Pos, _Path, Collected), H) :-
     length(Remaining, Missing),
     min_manhattan(Pos, Remaining, MinDist),
     H is K * Missing + MinDist.
+
+
+% --------------------------------------------------------------
+% (2) GREEDY BEST-FIRST SEARCH (GBFS)
+% --------------------------------------------------------------
+
+% gbfs(+Open, +Closed, +BestSoFar, -BestState)
+%
+% Open      : list of node(H, State) sorted ascending by H (lowest = best).
+% Closed    : list of positions already expanded (explicit closed list).
+% BestSoFar : the richest state seen so far (most survivors collected).
+% BestState : the best state found when the search terminates.
+%
+% Algorithm:
+%   1. Pop the head of Open (lowest H — the greedy choice).
+%   2. If its position is in Closed (already expanded), skip it.
+%   3. Otherwise:
+%        a. Update the current collected-survivor set.
+%        b. Compare with BestSoFar; keep the one with more survivors.
+%        c. Expand passable neighbours that are not in the current path.
+%        d. Insert each successor into Open in sorted order.
+%   4. When Open is empty, return the accumulated BestSoFar.
+
+% Base case: open list exhausted — return whatever best we have found.
+gbfs([], _Closed, Best, Best).
+
+% Skip nodes whose position has already been expanded (closed list check).
+gbfs([node(_H, state(Pos, _Path, _Coll))|Rest], Closed, BestSoFar, Best) :-
+    member(Pos, Closed), !,
+    gbfs(Rest, Closed, BestSoFar, Best).
+
+% Main expansion step.
+gbfs([node(_H, State)|Rest], Closed, BestSoFar, Best) :-
+    State = state(Pos, Path, Collected),
+
+    % Mark position as expanded.
+    NewClosed = [Pos|Closed],
+
+    % Rescue survivor at current cell if present.
+    cell_at(Pos, V),
+    ( V == s
+    -> NewCollected = [Pos|Collected]   % add survivor to collected set
+    ;  NewCollected = Collected
+    ),
+
+    % Build the state reflecting the newly updated collected set.
+    % (Path already has Pos at its head — no need to prepend again.)
+    CurrentState = state(Pos, Path, NewCollected),
+
+    % Update best-so-far: keep the state with more rescued survivors.
+    BestSoFar = state(_, _, BestColl),
+    length(NewCollected, Nc),
+    length(BestColl, Nb),
+    ( Nc > Nb
+    -> NewBest = CurrentState
+    ;  NewBest = BestSoFar
+    ),
+
+    % Find all passable neighbours not already visited in this path.
+    findall(
+        NPos,
+        ( neighbor(Pos, NPos),
+          \+ member(NPos, Path)   % no cell revisits within a single path
+        ),
+        Successors
+    ),
+
+    % Insert successor nodes into Open maintaining heuristic sort order.
+    % Pass Path (which already contains Pos) as the ancestor chain so that
+    % each successor NPos is stored as state(NPos, [NPos|Path], ...).
+    expand_successors(Successors, Path, NewCollected, Rest, NewOpen),
+
+    % Recurse with updated open list, closed list, and best state.
+    gbfs(NewOpen, NewClosed, NewBest, Best).
+
+
+% expand_successors(+Successors, +Path, +Collected, +OpenIn, -OpenOut)
+% For each successor position build a state, compute its heuristic, and
+% insert it into the open list maintaining sorted (ascending H) order.
+expand_successors([], _Path, _Collected, Open, Open).
+expand_successors([NPos|Rest], Path, Collected, OpenIn, OpenOut) :-
+    NState = state(NPos, [NPos|Path], Collected),
+    heuristic(NState, H),
+    insert_sorted(node(H, NState), OpenIn, OpenMid),
+    expand_successors(Rest, Path, Collected, OpenMid, OpenOut).
+
+
+% --------------------------------------------------------------
+% (3) SOLVE — ENTRY POINT
+% --------------------------------------------------------------
+
+% solve/0
+% Initialises GBFS from the robot's starting position and prints the
+% report for the path that rescued the greatest number of survivors.
+%
+% The initial BestSoFar is seeded with the start state (0 survivors
+% collected) so that any real improvement will immediately dominate.
+solve :-
+    find_start(Start),
+
+    % Build the initial state: robot at Start, path contains only Start.
+    InitState = state(Start, [Start], []),
+    heuristic(InitState, H0),
+    InitOpen = [node(H0, InitState)],
+
+    % Seed the accumulator with the start state (0 survivors so far).
+    InitBest = InitState,
+
+    % Run GBFS; BestState is the state with the most survivors found.
+    gbfs(InitOpen, [], InitBest, BestState),
+
+    % The path is stored in reverse order (newest cell first); flip it.
+    BestState = state(_FinalPos, ReversePath, Collected),
+    reverse(ReversePath, ForwardPath),
+
+    % Print the required report lines.
+    report(ForwardPath, Collected).
